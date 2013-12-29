@@ -24,7 +24,6 @@ type state struct {
     name *[]byte
 
     starttxt int
-    hadtxt bool
     
     idx int
     addr [2]byte
@@ -40,11 +39,10 @@ func (parser *parser) StartTxt() {
 }
 
 func (parser *parser) EndTxt() {
-    if (parser.state.starttxt > 0 && parser.state.starttxt < parser.state.position) {
+    if (parser.state.starttxt != -1 && parser.state.starttxt < parser.state.position) {
         parser.tn3270h.OnTN3270Text(parser.state.data[parser.state.starttxt:parser.state.position])
-        parser.state.hadtxt = true
     }
-    parser.state.starttxt = 0
+    parser.state.starttxt = -1
 }
 
 func (state *state) GetAddr() int {
@@ -76,7 +74,7 @@ func (state *state) GetAddr() int {
     action tn3270_sf { parser.tn3270h.OnTN3270SF(fc); }
     action tn3270_ra { parser.tn3270h.OnTN3270RA(state.GetAddr(), fc); }
     action tn3270_sfe { parser.tn3270h.OnTN3270SFE(fc); state.count = int(fc); fcall tn3270_args; }
-    action tn3270_message { parser.EndTxt(); state.hadtxt = false; parser.tn3270h.OnTN3270Message(); }
+    action tn3270_message { parser.EndTxt(); parser.tn3270h.OnTN3270Message(); }
 
     action tn3270_resource_name {
         state.name = &state.resourceName
@@ -247,6 +245,7 @@ func (state *state) GetAddr() int {
 
 func (parser *parser) Init() {
 	state := &parser.state
+    state.starttxt = -1
     
     %% write init;
 }
@@ -259,6 +258,9 @@ func (parser *parser) Parse(data []byte ) error {
     eof := 0
 
     %% write exec;
+
+    // Store any pending text
+    parser.EndTxt()
     
     return nil
 }

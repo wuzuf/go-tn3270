@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
-	"github.com/wuzuf/go-tn3270/tn3270"
+	"github.com/wuzuf/go-tn3270"
 	"os"
 )
 
@@ -20,18 +20,18 @@ func check(e error) {
 }
 
 func main() {
-	flag.Parse() // Scan the arguments list 
+	flag.Parse() // Scan the arguments list
 
 	if *versionFlag {
 		fmt.Println("Version:", APP_VERSION)
 	}
 
 	client := tn3270.NewClient("09123456")
-	fmt.Println(client.Connect("localhost:8023"))
+	recv, _ := client.Connect("localhost:10023")
+	fmt.Println(<-recv)
 	stdin := bufio.NewReader(os.Stdin)
 	for {
 		line, _, _ := stdin.ReadLine()
-		client.Send(string(line))
-		fmt.Println(client.Recv())
+		fmt.Println(<-client.Send(string(line)))
 	}
 }

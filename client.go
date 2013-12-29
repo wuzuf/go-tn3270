@@ -1,14 +1,13 @@
 package tn3270
 
 import (
-	"fmt"
 	"net"
 )
 
 type Client struct {
 	luname string
 	parser Parser
-	screen VirtualScreenTN3270Handler
+	screen TextTN3270Handler
 	read   chan []byte
 	write  chan []byte
 	msgin  chan string
@@ -38,24 +37,29 @@ func (c *Client) handle(conn net.Conn) {
 	go c.send(conn)
 }
 
-func (c *Client) Connect(addr string) string {
+func (c *Client) Connect(addr string) (res chan string, err error) {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
-		return fmt.Sprintf("Error: %s", err)
+		return
+	}
+	if debugServerConnections {
+		conn = newLoggingConn("server", conn)
 	}
 	go c.handle(conn)
-	return c.Recv()
+	res = c.msgin
+	return
 }
 
-func (c *Client) Recv() string {
-	return <-c.msgin
-}
-
-func (c *Client) Send(s string) {
+func (c *Client) Send(s string) chan string {
 	c.write <- []byte{0x00, 0x00, 0x00, 0x00, 0x00}
-	c.write <- []byte{0x7d, 0xc1, 0x50}
+	c.write <- []byte{0x7d, 0xc1, 0x50, 0x11, 0xc1, 0x50}
 	c.write <- A2E([]byte(s))
 	c.write <- []byte{0xff, 0xef}
+	return c.msgin
+}
+
+func (c *Client) SendRecv(s string) string {
+	return <-c.Send(s)
 }
 
 func (c *Client) OnTNCommand(b byte) {
@@ -104,8 +108,8 @@ func NewClient(luname string) (c *Client) {
 	c.luname = luname
 	c.parser = NewParser(c, c, &c.screen, c)
 	c.screen.rows = 24
-	c.screen.cols = 80
-	c.screen.screen = make(Screen, 24*80)
+	// c.screen.cols = 80
+	// c.screen.screen = make(Screen, 24*80)
 	c.screen.HandleMessage = func(s string) { c.msgin <- s }
 	c.read = make(chan []byte)
 	c.write = make(chan []byte)
