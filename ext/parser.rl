@@ -25,6 +25,7 @@ type state struct {
 
     starttxt int
     
+    command byte
     idx int
     addr [2]byte
     resourceName []byte
@@ -45,6 +46,13 @@ func (parser *parser) EndTxt() {
     parser.state.starttxt = -1
 }
 
+func (parser *parser) CaptureTxt() {
+    if (parser.state.starttxt != -1 && parser.state.starttxt < parser.state.position) {
+        parser.tn3270h.OnTN3270Text(parser.state.data[parser.state.starttxt:parser.state.position])
+        parser.state.starttxt = 0
+    }
+}
+
 func (state *state) GetAddr() int {
     if ((state.addr[0] & 0xC0) == 0x00)  {
         return (int(state.addr[0] & 0x3F) << 8) | int(state.addr[1])
@@ -62,7 +70,8 @@ func (state *state) GetAddr() int {
     action error { parser.errorh.OnError(state.data, state.position); }
 
     action tn_command { parser.tnh.OnTNCommand(fc);}
-    action tn_argcommand { parser.tnh.OnTNArgCommand(state.data[state.position-1], fc);}
+    action tn_argcommand {state.command = fc;}
+    action tn_argcommand_arg { parser.tnh.OnTNArgCommand(state.command, fc);}
 
     action tn3270_command { parser.tn3270h.OnTN3270Command(fc); }
     action tn3270_aid { parser.tn3270h.OnTN3270AID(fc); }
@@ -157,7 +166,7 @@ func (state *state) GetAddr() int {
     tn_plain_text = (^tn_iac | tn_iac tn_iac);
       
     tn_basic_command  = tn_iac tn_command @tn_command;
-    tn_arg_command    = tn_iac tn_command_arg any @tn_argcommand ;
+    tn_arg_command    = tn_iac tn_command_arg >tn_argcommand any @tn_argcommand_arg ;
     tn_subneg_command = tn_iac tn_commmand_subneg any @tn_subneg;
 
     tn_iac_sequence = ( tn_basic_command | tn_arg_command | tn_subneg_command );
@@ -260,7 +269,7 @@ func (parser *parser) Parse(data []byte ) error {
     %% write exec;
 
     // Store any pending text
-    parser.EndTxt()
+    parser.CaptureTxt()
     
     return nil
 }

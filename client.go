@@ -1,6 +1,9 @@
 package tn3270
 
 import (
+	"errors"
+	"io"
+	"log"
 	"net"
 )
 
@@ -14,18 +17,21 @@ type Client struct {
 	msgout chan string
 }
 
-func (c *Client) recv(conn net.Conn) {
+func (c *Client) recv(conn io.Reader) {
+	recv_buf := make([]byte, 2048)
 	for {
-		recv_buf := make([]byte, 1024)
 		n, _ := conn.Read(recv_buf)
 		if n == 0 {
 			break
 		}
-		c.parser.Parse(recv_buf[:n])
+		err := c.parser.Parse(recv_buf[:n])
+		if err != nil {
+			log.Printf("ERROR: %s", err)
+		}
 	}
 }
 
-func (c *Client) send(conn net.Conn) {
+func (c *Client) send(conn io.Writer) {
 	for {
 		data := <-c.write
 		conn.Write(data)
@@ -73,7 +79,8 @@ func (c *Client) OnTNArgCommand(b byte, arg byte) {
 }
 
 func (c *Client) OnError([]byte, int) error {
-	return nil
+	log.Printf("Error occured")
+	return errors.New("Unknown error")
 }
 
 func (c *Client) OnTN3270DeviceTypeRequest([]byte, []byte, []byte) {
@@ -108,8 +115,6 @@ func NewClient(luname string) (c *Client) {
 	c.luname = luname
 	c.parser = NewParser(c, c, &c.screen, c)
 	c.screen.rows = 24
-	// c.screen.cols = 80
-	// c.screen.screen = make(Screen, 24*80)
 	c.screen.HandleMessage = func(s string) { c.msgin <- s }
 	c.read = make(chan []byte)
 	c.write = make(chan []byte)
