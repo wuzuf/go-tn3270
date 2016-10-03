@@ -1,3 +1,17 @@
+// Copyright 2016 Gabriel de Labachelerie
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package tn3270
 
 type Parser interface {
@@ -24,7 +38,7 @@ type state struct {
     name *[]byte
 
     starttxt int
-    
+
     command byte
     idx int
     addr [2]byte
@@ -32,7 +46,7 @@ type state struct {
     deviceName []byte
     deviceType []byte
     functionsList []byte
-    
+
 }
 
 func (parser *parser) StartTxt() {
@@ -104,7 +118,7 @@ func (state *state) GetAddr() int {
     action tn3270_name {
     	*state.name = append(*state.name, fc)
     }
-    
+
     action tn3270_name_end {
         state.name = nil
     }
@@ -158,13 +172,13 @@ func (state *state) GetAddr() int {
     tn_do = 253;
     tn_dont = 254;
     tn_eor = 239;
-      
+
     tn_command = tn_nop | tn_brk | tn_ip | tn_ao | tn_ayt | tn_ec | tn_el | tn_ga;
     tn_command_arg = tn_will | tn_wont | tn_do | tn_dont;
     tn_commmand_subneg = tn_sb;
 
     tn_plain_text = (^tn_iac | tn_iac tn_iac);
-      
+
     tn_basic_command  = tn_iac tn_command @tn_command;
     tn_arg_command    = tn_iac tn_command_arg >tn_argcommand any @tn_argcommand_arg ;
     tn_subneg_command = tn_iac tn_commmand_subneg any @tn_subneg;
@@ -220,7 +234,7 @@ func (state *state) GetAddr() int {
                        | tn3270_subneg_device_type_reject
                        | tn3270_subneg_function_request
                        | tn3270_subneg_function_is;
-    
+
     tn3270_subneg := tn3270_subneg_list . tn_iac . tn_se @tn_subneg_end;
 
     tn3270_arg = any.any @tn3270_endarg;
@@ -239,7 +253,7 @@ func (state *state) GetAddr() int {
     tn3270_pt = 0x05 @tn3270_pt;
     tn3270_sfe = 0x29 . any @tn3270_sfe;
     tn3270_ra = 0x3c . tn3270_addr . any @tn3270_ra;
-        
+
     tn3270_order = ( tn3270_sba | tn3270_sf | tn3270_ic | tn3270_eua | tn3270_pt | tn3270_sfe | tn3270_ra ) >tn3270_endtxt %tn3270_starttxt;
     tn3270_plain_text = (any - (0x11 | 0x1d | 0x12 | 0x05 | 0x29 | 0x3c | tn_iac)) +;
     tn3270_content = (tn3270_order | tn3270_plain_text) *;
@@ -255,7 +269,7 @@ func (state *state) GetAddr() int {
 func (parser *parser) Init() {
 	state := &parser.state
     state.starttxt = -1
-    
+
     %% write init;
 }
 
@@ -270,7 +284,7 @@ func (parser *parser) Parse(data []byte ) error {
 
     // Store any pending text
     parser.CaptureTxt()
-    
+
     return nil
 }
 
