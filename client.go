@@ -15,6 +15,7 @@
 package tn3270
 
 import (
+	"crypto/tls"
 	"errors"
 	"io"
 	"log"
@@ -57,17 +58,32 @@ func (c *Client) handle(conn net.Conn) {
 	go c.send(conn)
 }
 
-func (c *Client) Connect(addr string) (res chan string, err error) {
-	conn, err := net.Dial("tcp", addr)
+func (c *Client) Connect(addr string) (chan string, error) {
+	var conn net.Conn
+	var err error
+	conn, err = net.Dial("tcp", addr)
 	if err != nil {
-		return
+		return nil, err
 	}
 	if debugServerConnections {
 		conn = newLoggingConn("server", conn)
 	}
 	go c.handle(conn)
-	res = c.msgin
-	return
+	return c.msgin, nil
+}
+
+func (c *Client) ConnectTLS(addr string, tslconfig *tls.Config) (chan string, error) {
+	var conn net.Conn
+	var err error
+	conn, err = tls.Dial("tcp", addr, tslconfig)
+	if err != nil {
+		return nil, err
+	}
+	if debugServerConnections {
+		conn = newLoggingConn("server", conn)
+	}
+	go c.handle(conn)
+	return c.msgin, nil
 }
 
 func (c *Client) Send(s string) chan string {

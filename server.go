@@ -16,12 +16,17 @@ package tn3270
 
 import (
 	"bufio"
-	"io"
-	"net"
-	"time"
-	"log"
+	"crypto/tls"
 	"fmt"
+	"io"
+	"log"
+	"net"
 	"strings"
+	"sync"
+	"sync/atomic"
+
+	"github.com/juju/errors"
+	"gopkg.in/tomb.v2"
 )
 
 // debugServerConnections controls whether all server connections are wrapped
@@ -40,9 +45,9 @@ type ResponseWriter interface {
 }
 
 type defaultResponseWriter struct {
-	headerWrote bool
+	headerWrote  bool
 	trailerWrote bool
-	buf *bufio.ReadWriter
+	buf          *bufio.ReadWriter
 }
 
 func (w *defaultResponseWriter) Write(s []byte) (n int, e error) {
@@ -64,7 +69,7 @@ func (w *defaultResponseWriter) finishRequest() {
 	w.buf.Flush()
 }
 
-// Objects implementing the Handler interface can be
+// Handler implements the Handler interface can be
 // registered to serve a particular path or subtree
 // in the HTTP server.
 //
@@ -78,8 +83,15 @@ type Handler interface {
 }
 
 type Server struct {
-	Addr         string        // TCP address to listen on, ":telnet" if empty
-	Handler      Handler       // handler to invoke
+	Addr      string  // TCP address to listen on, ":telnet" if empty
+	Handler   Handler // handler to invoke
+	TLSConfig *tls.Config
+
+	t          tomb.Tomb // Manages the go routine spawned by the server
+	mu         sync.Mutex
+	inShutdown int32 // accessed atomically (non-zero means we're in Shutdown)
+	listeners  map[*net.Listener]struct{}
+	activeConn map[*conn]struct{}
 }
 
 type conn struct {
@@ -92,12 +104,8 @@ type conn struct {
 }
 
 func (c *conn) serve() {
-	go c.recv()
 	c.buf.Write([]byte{0xff, 0xfd, 0x28})
 	c.buf.Flush()
-}
-
-func (c *conn) recv() {
 	for {
 		recv_buf := make([]byte, 1024)
 		n, _ := c.buf.Read(recv_buf)
@@ -108,9 +116,11 @@ func (c *conn) recv() {
 	}
 }
 
+func (c *conn) recv() {
+}
 
-type defaultTNHandler struct{
-	c *conn
+type defaultTNHandler struct {
+	c    *conn
 	text []string
 }
 
@@ -123,7 +133,6 @@ func (h *defaultTNHandler) OnTNArgCommand(c byte, a byte) {
 	}
 	h.c.buf.Flush()
 }
-
 
 func (h *defaultTNHandler) OnTN3270DeviceTypeRequest(device_type []byte, device_name []byte, resource_name []byte) {
 	h.c.buf.Write([]byte{0xff, 0xfa, 0x28, 0x02, 0x04})
@@ -153,7 +162,7 @@ func (h *defaultTNHandler) OnTN3270FunctionsIs([]byte) {
 }
 
 func (h *defaultTNHandler) OnTN3270FunctionsRequest([]byte) {
-	h.c.buf.Write([]byte{0xff,0xfa,0x28,0x03,0x07,0xff,0xf0})
+	h.c.buf.Write([]byte{0xff, 0xfa, 0x28, 0x03, 0x07, 0xff, 0xf0})
 	h.c.buf.Flush()
 }
 
@@ -212,12 +221,10 @@ func (h *defaultTNHandler) OnTN3270Message() {
 	w.finishRequest()
 }
 
-
-
-func (srv *Server) newConn(rwc net.Conn) (c *conn, err error) {
-	c = new(conn)
+func (s *Server) newConn(rwc net.Conn) *conn {
+	c := new(conn)
 	c.remoteAddr = rwc.RemoteAddr().String()
-	c.server = srv
+	c.server = s
 	c.rwc = rwc
 	h := &defaultTNHandler{c: c, text: make([]string, 0)}
 	c.parser = NewParser(h, h, h, h)
@@ -229,55 +236,173 @@ func (srv *Server) newConn(rwc net.Conn) (c *conn, err error) {
 	br := bufio.NewReader(c.lr)
 	bw := bufio.NewWriter(c.rwc)
 	c.buf = bufio.NewReadWriter(br, bw)
-	return c, nil
+	return c
 }
 
-// ListenAndServe listens on the TCP network address srv.Addr and then
+// ListenAndServe listens on the TCP network address s.Addr and then
 // calls Serve to handle requests on incoming connections.  If
-// srv.Addr is blank, ":telnet" is used.
-func (srv *Server) ListenAndServe() error {
-	addr := srv.Addr
+// s.Addr is blank, ":telnet" is used.
+func (s *Server) ListenAndServe() error {
+	addr := s.Addr
 	if addr == "" {
 		addr = ":telnet"
 	}
-	l, e := net.Listen("tcp", addr)
-	if e != nil {
-		return e
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
 	}
-	return srv.Serve(l)
+	return s.Serve(l)
 }
+
+func (s *Server) shuttingDown() bool {
+	// TODO: replace inShutdown with the existing atomicBool type;
+	// see https://github.com/golang/go/issues/20239#issuecomment-381434582
+	return atomic.LoadInt32(&s.inShutdown) != 0
+}
+
+func (s *Server) ListenAndServeTLS(certFile, keyFile string) error {
+	if s.shuttingDown() {
+		return errors.New("Server closed")
+	}
+	addr := s.Addr
+	if addr == "" {
+		addr = ":https"
+	}
+
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+
+	defer ln.Close()
+
+	return s.ServeTLS(ln, certFile, keyFile)
+}
+
+// cloneTLSConfig returns a shallow clone of cfg, or a new zero tls.Config if
+// cfg is nil. This is safe to call even if cfg is in active use by a TLS
+// client or server.
+func cloneTLSConfig(cfg *tls.Config) *tls.Config {
+	if cfg == nil {
+		return &tls.Config{}
+	}
+	return cfg.Clone()
+}
+
+// ServeTLS accepts incoming connections on the Listener l, creating a
+// new service goroutine for each. The service goroutines perform TLS
+// setup and then read requests, calling srv.Handler to reply to them.
+func (srv *Server) ServeTLS(l net.Listener, certFile, keyFile string) error {
+
+	config := cloneTLSConfig(srv.TLSConfig)
+
+	configHasCert := len(config.Certificates) > 0 || config.GetCertificate != nil
+	if !configHasCert || certFile != "" || keyFile != "" {
+		var err error
+		config.Certificates = make([]tls.Certificate, 1)
+		config.Certificates[0], err = tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return err
+		}
+	}
+
+	tlsListener := tls.NewListener(l, config)
+	return srv.Serve(tlsListener)
+}
+
+var ErrServerClosed = errors.New("Server closed")
 
 // Serve accepts incoming connections on the Listener l, creating a
 // new service goroutine for each.  The service goroutines read requests and
-// then call srv.Handler to reply to them.
-func (srv *Server) Serve(l net.Listener) error {
+// then call s.Handler to reply to them.
+func (s *Server) Serve(l net.Listener) error {
 	defer l.Close()
-	var tempDelay time.Duration // how long to sleep on accept failure
-	for {
-		rw, e := l.Accept()
-		if e != nil {
-			if ne, ok := e.(net.Error); ok && ne.Temporary() {
-				if tempDelay == 0 {
-					tempDelay = 5 * time.Millisecond
-				} else {
-					tempDelay *= 2
-				}
-				if max := 1 * time.Second; tempDelay > max {
-					tempDelay = max
-				}
-				log.Printf("http: Accept error: %v; retrying in %v", e, tempDelay)
-				time.Sleep(tempDelay)
-				continue
-			}
-			return e
-		}
-		tempDelay = 0
-		c, err := srv.newConn(rw)
-		if err != nil {
-			continue
-		}
-		go c.serve()
+
+	if !s.trackListener(&l, true) {
+		return ErrServerClosed
 	}
+	defer s.trackListener(&l, false)
+
+	for {
+		rw, err := l.Accept()
+		if err != nil {
+			select {
+			case <-s.t.Dying():
+				return nil
+			default:
+			}
+			return err
+		}
+		c := s.newConn(rw)
+		s.t.Go(func() error {
+			c.serve()
+			return nil
+		})
+	}
+}
+
+// trackListener adds or removes a net.Listener to the set of tracked
+// listeners.
+//
+// We store a pointer to interface in the map set, in case the
+// net.Listener is not comparable. This is safe because we only call
+// trackListener via Serve and can track+defer untrack the same
+// pointer to local variable there. We never need to compare a
+// Listener from another caller.
+//
+// It reports whether the server is still up (not Shutdown or Closed).
+func (s *Server) trackListener(ln *net.Listener, add bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listeners == nil {
+		s.listeners = make(map[*net.Listener]struct{})
+	}
+	if add {
+		if s.shuttingDown() {
+			return false
+		}
+		s.listeners[ln] = struct{}{}
+	} else {
+		delete(s.listeners, ln)
+	}
+	return true
+}
+
+func (s *Server) trackConn(c *conn, add bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.activeConn == nil {
+		s.activeConn = make(map[*conn]struct{})
+	}
+	if add {
+		s.activeConn[c] = struct{}{}
+	} else {
+		delete(s.activeConn, c)
+	}
+}
+
+func (s *Server) closeListenersLocked() error {
+	var err error
+	for ln := range s.listeners {
+		if cerr := (*ln).Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+		delete(s.listeners, ln)
+	}
+	return err
+}
+
+func (s *Server) Close() error {
+	atomic.StoreInt32(&s.inShutdown, 1)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.t.Kill(nil)
+	err := s.closeListenersLocked()
+	for c := range s.activeConn {
+		c.rwc.Close()
+		delete(s.activeConn, c)
+	}
+	return err
 }
 
 // loggingConn is used for debugging.
